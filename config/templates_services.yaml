@@ -1,0 +1,201 @@
+# Default service templates
+services:
+  # HTTP LoadBalancer services
+  - id: "simple-http"
+    name: "Simple HTTP LoadBalancer"
+    type: "loadBalancer"
+    config:
+      servers:
+        - url: "http://localhost:8080"
+
+  - id: "multi-server-http"
+    name: "Multi-Server HTTP LoadBalancer"
+    type: "loadBalancer"
+    config:
+      servers:
+        - url: "http://server1:8080"
+        - url: "http://server2:8080"
+
+  - id: "weighted-servers"
+    name: "Weighted HTTP Servers"
+    type: "loadBalancer"
+    config:
+      servers:
+        - url: "http://primary:8080"
+          weight: 3
+        - url: "http://secondary:8080"
+          weight: 1
+
+  - id: "health-check"
+    name: "HTTP Service with Health Check"
+    type: "loadBalancer"
+    config:
+      servers:
+        - url: "http://backend:8080"
+      healthCheck:
+        path: "/health"
+        interval: "10s"
+        timeout: "3s"
+        port: 8080
+        scheme: "http"
+
+  - id: "sticky-session"
+    name: "HTTP Service with Sticky Sessions"
+    type: "loadBalancer"
+    config:
+      servers:
+        - url: "http://backend1:8080"
+        - url: "http://backend2:8080"
+      sticky:
+        cookie:
+          name: "sticky_session"
+          secure: true
+          httpOnly: true
+
+  - id: "preserved-path"
+    name: "HTTP Service with Path Preservation"
+    type: "loadBalancer"
+    config:
+      servers:
+        - url: "http://backend:8080/base"
+          preservePath: true
+
+  - id: "passhost-disabled"
+    name: "HTTP Service with PassHost Disabled"
+    type: "loadBalancer"
+    config:
+      servers:
+        - url: "http://backend:8080"
+      passHostHeader: false
+
+  - id: "response-forwarding"
+    name: "Service with Response Forwarding"
+    type: "loadBalancer"
+    config:
+      servers:
+        - url: "http://backend:8080"
+      responseForwarding:
+        flushInterval: "1s"
+
+  # TCP services
+  - id: "tcp-service"
+    name: "TCP Service"
+    type: "loadBalancer"
+    config:
+      servers:
+        - address: "backend:9000"
+
+  - id: "tls-passthrough"
+    name: "TLS Passthrough"
+    type: "loadBalancer"
+    config:
+      servers:
+        - address: "backend:8443"
+          tls: true
+
+  - id: "tcp-proxy-protocol"
+    name: "TCP with Proxy Protocol"
+    type: "loadBalancer"
+    config:
+      servers:
+        - address: "backend:8080"
+      proxyProtocol:
+        version: 1
+
+  - id: "tcp-termination-delay"
+    name: "TCP with Termination Delay"
+    type: "loadBalancer"
+    config:
+      servers:
+        - address: "backend:8080"
+      terminationDelay: 200
+
+  # UDP services
+  - id: "udp-service"
+    name: "UDP Service"
+    type: "loadBalancer"
+    config:
+      servers:
+        - address: "backend:53"
+
+  # Weighted services
+  - id: "weighted-service"
+    name: "Weighted Service"
+    type: "weighted"
+    config:
+      services:
+        - name: "service1@file"
+          weight: 3
+        - name: "service2@file"
+          weight: 1
+
+  - id: "weighted-with-health"
+    name: "Weighted Service with Health Check"
+    type: "weighted"
+    config:
+      healthCheck: {}
+      services:
+        - name: "service1@file"
+          weight: 3
+        - name: "service2@file"
+          weight: 1
+
+  - id: "weighted-with-sticky"
+    name: "Weighted Service with Sticky Sessions"
+    type: "weighted"
+    config:
+      sticky:
+        cookie:
+          name: "lvl1"
+      services:
+        - name: "service1@file"
+          weight: 1
+        - name: "service2@file"
+          weight: 1
+
+  # Mirroring services
+  - id: "traffic-mirror"
+    name: "Traffic Mirroring Service"
+    type: "mirroring"
+    config:
+      service: "main-service@file"
+      mirrors:
+        - name: "test-service@file"
+          percent: 10
+
+  - id: "full-mirror"
+    name: "Full Traffic Mirror"
+    type: "mirroring"
+    config:
+      service: "production@file"
+      mirrorBody: true
+      maxBodySize: 10240
+      mirrors:
+        - name: "staging@file"
+          percent: 100
+
+  - id: "mirror-with-health"
+    name: "Mirroring Service with Health Check"
+    type: "mirroring"
+    config:
+      healthCheck: {}
+      service: "main-service@file"
+      mirrors:
+        - name: "test-service@file"
+          percent: 10
+
+  # Failover services
+  - id: "failover-service"
+    name: "Failover Service"
+    type: "failover"
+    config:
+      service: "main-service@file"
+      fallback: "backup-service@file"
+
+  - id: "failover-with-health"
+    name: "Failover Service with Health Check"
+    type: "failover"
+    config:
+      healthCheck: {}
+      service: "main-service@file"
+      fallback: "backup-service@file"
