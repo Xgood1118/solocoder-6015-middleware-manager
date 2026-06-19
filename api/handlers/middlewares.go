@@ -68,14 +68,32 @@ type ImportResponse struct {
 }
 
 func validateConfigValueTypes(config map[string]interface{}) bool {
-	for _, v := range config {
-		switch v.(type) {
-		case string, int, int64, float64, bool:
-		default:
-			return false
+	return validateLeafTypes(config)
+}
+
+func validateLeafTypes(data interface{}) bool {
+	switch v := data.(type) {
+	case map[string]interface{}:
+		for _, val := range v {
+			if !validateLeafTypes(val) {
+				return false
+			}
 		}
+		return true
+	case []interface{}:
+		for _, val := range v {
+			if !validateLeafTypes(val) {
+				return false
+			}
+		}
+		return true
+	case string, int, int64, float64, bool:
+		return true
+	case nil:
+		return false
+	default:
+		return false
 	}
-	return true
 }
 
 // MiddlewareHandler handles middleware-related requests

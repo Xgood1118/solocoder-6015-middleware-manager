@@ -433,6 +433,14 @@ func TestMiddlewareHandler_ExportMiddlewares(t *testing.T) {
 		INSERT INTO middlewares (id, name, type, config, created_at)
 		VALUES ('exp-2', 'my-headers', 'headers', '{"customRequestHeaders":{"X-Test":"yes"}}', '2025-01-02T00:00:00Z')
 	`)
+	testutil.MustExec(t, db, `
+		INSERT INTO resources (id, host, service_id, org_id, site_id)
+		VALUES ('res-1', 'example.com', 'svc-1', 'org-1', 'site-1')
+	`)
+	testutil.MustExec(t, db, `
+		INSERT INTO resource_middlewares (resource_id, middleware_id, priority)
+		VALUES ('res-1', 'exp-1', 50)
+	`)
 
 	c, rec := testutil.NewContext(t, http.MethodGet, "/api/middlewares/export", nil)
 	handler.ExportMiddlewares(c)
@@ -459,6 +467,25 @@ func TestMiddlewareHandler_ExportMiddlewares(t *testing.T) {
 	}
 	if len(middlewares) != 2 {
 		t.Errorf("expected 2 middlewares in export, got %d", len(middlewares))
+	}
+
+	for _, mw := range middlewares {
+		m := mw.(map[string]interface{})
+		if m["name"] == nil || m["type"] == nil || m["config"] == nil || m["priority"] == nil || m["created_at"] == nil {
+			t.Errorf("middleware export item missing required field: %+v", m)
+		}
+		if m["name"] == "rate-limiter" {
+			priority := int(m["priority"].(float64))
+			if priority != 50 {
+				t.Errorf("expected priority 50 for rate-limiter, got %d", priority)
+			}
+		}
+		if m["name"] == "my-headers" {
+			priority := int(m["priority"].(float64))
+			if priority != 100 {
+				t.Errorf("expected default priority 100 for my-headers, got %d", priority)
+			}
+		}
 	}
 }
 
@@ -592,7 +619,7 @@ func TestMiddlewareHandler_ImportMiddlewares_InvalidConfigTypesSkipped(t *testin
 
 	importJSON := `{
 		"middlewares": [
-			{"name": "bad-config", "type": "headers", "config": {"nested": {"deep": "value"}}},
+			{"name": "bad-config", "type": "headers", "config": {"nilField": null}},
 			{"name": "good-config", "type": "headers", "config": {"simple": "string"}}
 		]
 	}`
@@ -702,10 +729,13 @@ func TestValidateConfigValueTypes(t *testing.T) {
 		{"int value", map[string]interface{}{"key": 42}, true},
 		{"float value", map[string]interface{}{"key": 3.14}, true},
 		{"bool value", map[string]interface{}{"key": true}, true},
-		{"nested object", map[string]interface{}{"key": map[string]interface{}{"nested": "val"}}, false},
-		{"array value", map[string]interface{}{"key": []interface{}{"a", "b"}}, false},
+		{"nested object with valid leaves", map[string]interface{}{"key": map[string]interface{}{"nested": "val"}}, true},
+		{"nested object with nil leaf", map[string]interface{}{"key": map[string]interface{}{"nested": nil}}, false},
+		{"array with valid leaves", map[string]interface{}{"key": []interface{}{"a", "b"}}, true},
 		{"nil value", map[string]interface{}{"key": nil}, false},
 		{"mixed valid", map[string]interface{}{"a": "str", "b": 1, "c": true, "d": 2.5}, true},
+		{"deeply nested valid", map[string]interface{}{"headers": map[string]interface{}{"customRequestHeaders": map[string]interface{}{"X-Test": "yes"}}}, true},
+		{"array of objects", map[string]interface{}{"items": []interface{}{map[string]interface{}{"name": "test"}}}, true},
 	}
 
 	for _, tt := range tests {
