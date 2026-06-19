@@ -22,6 +22,12 @@ export type {
   MiddlewareTemplate,
   CreateMiddlewareRequest,
   UpdateMiddlewareRequest,
+  MiddlewareExportItem,
+  ExportSnapshot,
+  ImportMiddlewareEntry,
+  ImportTaskStatus,
+  ImportTask,
+  ImportResponse,
 } from './middleware'
 export { MIDDLEWARE_TYPE_LABELS } from './middleware'
 

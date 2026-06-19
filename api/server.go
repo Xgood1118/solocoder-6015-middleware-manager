@@ -158,6 +158,9 @@ func (s *Server) setupRoutes(uiPath string) {
 		{
 			middlewares.GET("", s.middlewareHandler.GetMiddlewares)
 			middlewares.POST("", s.middlewareHandler.CreateMiddleware)
+			middlewares.GET("/export", s.middlewareHandler.ExportMiddlewares)
+			middlewares.POST("/import", s.middlewareHandler.ImportMiddlewares)
+			middlewares.GET("/import/:id/status", s.middlewareHandler.GetImportStatus)
 			middlewares.GET("/:id", s.middlewareHandler.GetMiddleware)
 			middlewares.PUT("/:id", s.middlewareHandler.UpdateMiddleware)
 			middlewares.DELETE("/:id", s.middlewareHandler.DeleteMiddleware)

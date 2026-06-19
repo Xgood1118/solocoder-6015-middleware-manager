@@ -52,6 +52,45 @@ export interface UpdateMiddlewareRequest {
   config?: Record<string, unknown>
 }
 
+export interface MiddlewareExportItem {
+  name: string
+  type: MiddlewareType
+  config: Record<string, unknown>
+  priority: number
+  created_at: string
+}
+
+export interface ExportSnapshot {
+  exported_at: string
+  version: string
+  middlewares: MiddlewareExportItem[]
+}
+
+export interface ImportMiddlewareEntry {
+  name: string
+  type: MiddlewareType
+  config: Record<string, unknown>
+  priority?: number
+}
+
+export type ImportTaskStatus = 'pending' | 'running' | 'done' | 'failed'
+
+export interface ImportTask {
+  id: string
+  status: ImportTaskStatus
+  skipped: string[]
+  imported_ids: string[]
+  failed_ids: string[]
+  total: number
+  processed: number
+  error_message?: string
+}
+
+export interface ImportResponse {
+  task_id: string
+  status: string
+}
+
 // Middleware type display names
 export const MIDDLEWARE_TYPE_LABELS: Record<MiddlewareType, string> = {
   basicAuth: 'Basic Auth',

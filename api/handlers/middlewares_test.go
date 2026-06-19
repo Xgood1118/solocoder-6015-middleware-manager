@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/hhftechnology/middleware-manager/database"
@@ -415,6 +416,303 @@ func TestMiddlewareHandler_ValidMiddlewareTypes(t *testing.T) {
 
 			if rec.Code != http.StatusCreated {
 				t.Errorf("expected 201 for type %s, got %d: %s", mwType, rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestMiddlewareHandler_ExportMiddlewares(t *testing.T) {
+	db := testutil.NewTempDB(t)
+	handler := NewMiddlewareHandler(db.DB)
+
+	testutil.MustExec(t, db, `
+		INSERT INTO middlewares (id, name, type, config, created_at)
+		VALUES ('exp-1', 'rate-limiter', 'rateLimit', '{"average":100}', '2025-01-01T00:00:00Z')
+	`)
+	testutil.MustExec(t, db, `
+		INSERT INTO middlewares (id, name, type, config, created_at)
+		VALUES ('exp-2', 'my-headers', 'headers', '{"customRequestHeaders":{"X-Test":"yes"}}', '2025-01-02T00:00:00Z')
+	`)
+
+	c, rec := testutil.NewContext(t, http.MethodGet, "/api/middlewares/export", nil)
+	handler.ExportMiddlewares(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var snapshot map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &snapshot); err != nil {
+		t.Fatalf("failed to parse export response: %v", err)
+	}
+
+	if snapshot["version"] != "1.0" {
+		t.Errorf("expected version 1.0, got %v", snapshot["version"])
+	}
+	if snapshot["exported_at"] == nil {
+		t.Error("expected exported_at field")
+	}
+
+	middlewares, ok := snapshot["middlewares"].([]interface{})
+	if !ok {
+		t.Fatal("expected middlewares to be an array")
+	}
+	if len(middlewares) != 2 {
+		t.Errorf("expected 2 middlewares in export, got %d", len(middlewares))
+	}
+}
+
+func TestMiddlewareHandler_ExportMiddlewares_Empty(t *testing.T) {
+	db := testutil.NewTempDB(t)
+	handler := NewMiddlewareHandler(db.DB)
+
+	c, rec := testutil.NewContext(t, http.MethodGet, "/api/middlewares/export", nil)
+	handler.ExportMiddlewares(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var snapshot map[string]interface{}
+	json.Unmarshal(rec.Body.Bytes(), &snapshot)
+
+	middlewares, ok := snapshot["middlewares"].([]interface{})
+	if !ok {
+		t.Fatal("expected middlewares to be an array")
+	}
+	if len(middlewares) != 0 {
+		t.Errorf("expected 0 middlewares in export, got %d", len(middlewares))
+	}
+}
+
+func TestMiddlewareHandler_ImportMiddlewares(t *testing.T) {
+	db := testutil.NewTempDB(t)
+	handler := NewMiddlewareHandler(db.DB)
+
+	importJSON := `{
+		"middlewares": [
+			{"name": "imported-headers", "type": "headers", "config": {"customRequestHeaders":{"X-Import":"yes"}}, "priority": 50},
+			{"name": "imported-ratelimit", "type": "rateLimit", "config": {"average":100}, "priority": 100}
+		]
+	}`
+
+	c, rec := testutil.NewContext(t, http.MethodPost, "/api/middlewares/import", bytes.NewBufferString(importJSON))
+	handler.ImportMiddlewares(c)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]interface{}
+	json.Unmarshal(rec.Body.Bytes(), &resp)
+
+	taskID, ok := resp["task_id"].(string)
+	if !ok || taskID == "" {
+		t.Fatal("expected task_id in response")
+	}
+
+	time.Sleep(500 * time.Millisecond)
+
+	statusC, statusRec := testutil.NewContext(t, http.MethodGet, "/api/middlewares/import/"+taskID+"/status", nil)
+	statusC.Params = gin.Params{{Key: "id", Value: taskID}}
+	handler.GetImportStatus(statusC)
+
+	if statusRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for status, got %d: %s", statusRec.Code, statusRec.Body.String())
+	}
+
+	var status map[string]interface{}
+	json.Unmarshal(statusRec.Body.Bytes(), &status)
+
+	if status["status"] != "done" {
+		t.Errorf("expected status done, got %v (full: %+v)", status["status"], status)
+	}
+
+	importedIDs, ok := status["imported_ids"].([]interface{})
+	if !ok {
+		t.Fatal("expected imported_ids to be an array")
+	}
+	if len(importedIDs) != 2 {
+		t.Errorf("expected 2 imported IDs, got %d", len(importedIDs))
+	}
+}
+
+func TestMiddlewareHandler_ImportMiddlewares_InvalidTypeSkipped(t *testing.T) {
+	db := testutil.NewTempDB(t)
+	handler := NewMiddlewareHandler(db.DB)
+
+	importJSON := `{
+		"middlewares": [
+			{"name": "valid-mw", "type": "headers", "config": {"customRequestHeaders":{"X-Test":"1"}}},
+			{"name": "invalid-mw", "type": "notARealType", "config": {}}
+		]
+	}`
+
+	c, rec := testutil.NewContext(t, http.MethodPost, "/api/middlewares/import", bytes.NewBufferString(importJSON))
+	handler.ImportMiddlewares(c)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]interface{}
+	json.Unmarshal(rec.Body.Bytes(), &resp)
+	taskID := resp["task_id"].(string)
+
+	time.Sleep(500 * time.Millisecond)
+
+	statusC, statusRec := testutil.NewContext(t, http.MethodGet, "/api/middlewares/import/"+taskID+"/status", nil)
+	statusC.Params = gin.Params{{Key: "id", Value: taskID}}
+	handler.GetImportStatus(statusC)
+
+	var status map[string]interface{}
+	json.Unmarshal(statusRec.Body.Bytes(), &status)
+
+	if status["status"] != "done" {
+		t.Errorf("expected status done, got %v", status["status"])
+	}
+
+	skipped, ok := status["skipped"].([]interface{})
+	if !ok {
+		t.Fatal("expected skipped to be an array")
+	}
+	if len(skipped) != 1 || skipped[0] != "invalid-mw" {
+		t.Errorf("expected skipped to contain 'invalid-mw', got %v", skipped)
+	}
+
+	importedIDs, _ := status["imported_ids"].([]interface{})
+	if len(importedIDs) != 1 {
+		t.Errorf("expected 1 imported ID, got %d", len(importedIDs))
+	}
+}
+
+func TestMiddlewareHandler_ImportMiddlewares_InvalidConfigTypesSkipped(t *testing.T) {
+	db := testutil.NewTempDB(t)
+	handler := NewMiddlewareHandler(db.DB)
+
+	importJSON := `{
+		"middlewares": [
+			{"name": "bad-config", "type": "headers", "config": {"nested": {"deep": "value"}}},
+			{"name": "good-config", "type": "headers", "config": {"simple": "string"}}
+		]
+	}`
+
+	c, rec := testutil.NewContext(t, http.MethodPost, "/api/middlewares/import", bytes.NewBufferString(importJSON))
+	handler.ImportMiddlewares(c)
+
+	var resp map[string]interface{}
+	json.Unmarshal(rec.Body.Bytes(), &resp)
+	taskID := resp["task_id"].(string)
+
+	time.Sleep(500 * time.Millisecond)
+
+	statusC, statusRec := testutil.NewContext(t, http.MethodGet, "/api/middlewares/import/"+taskID+"/status", nil)
+	statusC.Params = gin.Params{{Key: "id", Value: taskID}}
+	handler.GetImportStatus(statusC)
+
+	var status map[string]interface{}
+	json.Unmarshal(statusRec.Body.Bytes(), &status)
+
+	skipped, _ := status["skipped"].([]interface{})
+	if len(skipped) != 1 || skipped[0] != "bad-config" {
+		t.Errorf("expected 'bad-config' in skipped, got %v", skipped)
+	}
+}
+
+func TestMiddlewareHandler_ImportMiddlewares_IdempotentOverwrite(t *testing.T) {
+	db := testutil.NewTempDB(t)
+	handler := NewMiddlewareHandler(db.DB)
+
+	testutil.MustExec(t, db, `
+		INSERT INTO middlewares (id, name, type, config, created_at)
+		VALUES ('old-id', 'existing-mw', 'headers', '{"old":true}', '2025-01-01T00:00:00Z')
+	`)
+
+	importJSON := `{
+		"middlewares": [
+			{"name": "existing-mw", "type": "rateLimit", "config": {"average":50}, "priority": 10}
+		]
+	}`
+
+	c, rec := testutil.NewContext(t, http.MethodPost, "/api/middlewares/import", bytes.NewBufferString(importJSON))
+	handler.ImportMiddlewares(c)
+
+	var resp map[string]interface{}
+	json.Unmarshal(rec.Body.Bytes(), &resp)
+	taskID := resp["task_id"].(string)
+
+	time.Sleep(500 * time.Millisecond)
+
+	statusC, statusRec := testutil.NewContext(t, http.MethodGet, "/api/middlewares/import/"+taskID+"/status", nil)
+	statusC.Params = gin.Params{{Key: "id", Value: taskID}}
+	handler.GetImportStatus(statusC)
+
+	var status map[string]interface{}
+	json.Unmarshal(statusRec.Body.Bytes(), &status)
+
+	if status["status"] != "done" {
+		t.Errorf("expected status done, got %v", status["status"])
+	}
+
+	var count int
+	db.DB.QueryRow("SELECT COUNT(*) FROM middlewares WHERE name = 'existing-mw'").Scan(&count)
+	if count != 1 {
+		t.Errorf("expected 1 middleware with name existing-mw, got %d", count)
+	}
+
+	var mwType string
+	db.DB.QueryRow("SELECT type FROM middlewares WHERE name = 'existing-mw'").Scan(&mwType)
+	if mwType != "rateLimit" {
+		t.Errorf("expected overwritten type to be rateLimit, got %s", mwType)
+	}
+}
+
+func TestMiddlewareHandler_ImportMiddlewares_StatusNotFound(t *testing.T) {
+	db := testutil.NewTempDB(t)
+	handler := NewMiddlewareHandler(db.DB)
+
+	c, rec := testutil.NewContext(t, http.MethodGet, "/api/middlewares/import/nonexistent/status", nil)
+	c.Params = gin.Params{{Key: "id", Value: "nonexistent"}}
+	handler.GetImportStatus(c)
+
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", rec.Code)
+	}
+}
+
+func TestMiddlewareHandler_ImportMiddlewares_InvalidRequestBody(t *testing.T) {
+	db := testutil.NewTempDB(t)
+	handler := NewMiddlewareHandler(db.DB)
+
+	c, rec := testutil.NewContext(t, http.MethodPost, "/api/middlewares/import", bytes.NewBufferString(`{}`))
+	handler.ImportMiddlewares(c)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", rec.Code)
+	}
+}
+
+func TestValidateConfigValueTypes(t *testing.T) {
+	tests := []struct {
+		name   string
+		config map[string]interface{}
+		valid  bool
+	}{
+		{"string value", map[string]interface{}{"key": "value"}, true},
+		{"int value", map[string]interface{}{"key": 42}, true},
+		{"float value", map[string]interface{}{"key": 3.14}, true},
+		{"bool value", map[string]interface{}{"key": true}, true},
+		{"nested object", map[string]interface{}{"key": map[string]interface{}{"nested": "val"}}, false},
+		{"array value", map[string]interface{}{"key": []interface{}{"a", "b"}}, false},
+		{"nil value", map[string]interface{}{"key": nil}, false},
+		{"mixed valid", map[string]interface{}{"a": "str", "b": 1, "c": true, "d": 2.5}, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := validateConfigValueTypes(tt.config)
+			if result != tt.valid {
+				t.Errorf("validateConfigValueTypes() = %v, want %v", result, tt.valid)
 			}
 		})
 	}

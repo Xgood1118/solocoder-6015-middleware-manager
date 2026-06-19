@@ -6,10 +6,77 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
 )
+
+type ImportTaskStatus string
+
+const (
+	ImportStatusPending ImportTaskStatus = "pending"
+	ImportStatusRunning ImportTaskStatus = "running"
+	ImportStatusDone    ImportTaskStatus = "done"
+	ImportStatusFailed  ImportTaskStatus = "failed"
+)
+
+type ImportTask struct {
+	ID             string           `json:"id"`
+	Status         ImportTaskStatus `json:"status"`
+	Skipped        []string         `json:"skipped"`
+	ImportedIDs    []string         `json:"imported_ids"`
+	FailedIDs      []string         `json:"failed_ids"`
+	Total          int              `json:"total"`
+	Processed      int              `json:"processed"`
+	ErrorMessage   string           `json:"error_message,omitempty"`
+}
+
+var (
+	importTasks = make(map[string]*ImportTask)
+	importMu    sync.RWMutex
+)
+
+type MiddlewareExportItem struct {
+	Name      string                 `json:"name"`
+	Type      string                 `json:"type"`
+	Config    map[string]interface{} `json:"config"`
+	Priority  int                    `json:"priority"`
+	CreatedAt string                 `json:"created_at"`
+}
+
+type ExportSnapshot struct {
+	ExportedAt  string                 `json:"exported_at"`
+	Version     string                 `json:"version"`
+	Middlewares []MiddlewareExportItem `json:"middlewares"`
+}
+
+type ImportRequest struct {
+	Middlewares []ImportMiddlewareEntry `json:"middlewares" binding:"required"`
+}
+
+type ImportMiddlewareEntry struct {
+	Name     string                 `json:"name" binding:"required"`
+	Type     string                 `json:"type" binding:"required"`
+	Config   map[string]interface{} `json:"config" binding:"required"`
+	Priority int                    `json:"priority"`
+}
+
+type ImportResponse struct {
+	TaskID string `json:"task_id"`
+	Status string `json:"status"`
+}
+
+func validateConfigValueTypes(config map[string]interface{}) bool {
+	for _, v := range config {
+		switch v.(type) {
+		case string, int, int64, float64, bool:
+		default:
+			return false
+		}
+	}
+	return true
+}
 
 // MiddlewareHandler handles middleware-related requests
 type MiddlewareHandler struct {
@@ -402,4 +469,256 @@ func (h *MiddlewareHandler) DeleteMiddleware(c *gin.Context) {
 
 	log.Printf("Successfully deleted middleware %s", id)
 	c.JSON(http.StatusOK, gin.H{"message": "Middleware deleted successfully"})
+}
+
+func (h *MiddlewareHandler) ExportMiddlewares(c *gin.Context) {
+	query := `
+		SELECT m.name, m.type, m.config, m.created_at,
+		       COALESCE((SELECT MAX(rm.priority) FROM resource_middlewares rm WHERE rm.middleware_id = m.id), 100) AS priority
+		FROM middlewares m
+		ORDER BY m.name`
+
+	rows, err := h.DB.Query(query)
+	if err != nil {
+		log.Printf("Error fetching middlewares for export: %v", err)
+		ResponseWithError(c, http.StatusInternalServerError, "Failed to fetch middlewares for export")
+		return
+	}
+	defer rows.Close()
+
+	exportItems := []MiddlewareExportItem{}
+	for rows.Next() {
+		var name, typ, configStr string
+		var createdAt string
+		var priority int
+		if err := rows.Scan(&name, &typ, &configStr, &createdAt, &priority); err != nil {
+			log.Printf("Error scanning middleware row for export: %v", err)
+			continue
+		}
+
+		var config map[string]interface{}
+		if err := json.Unmarshal([]byte(configStr), &config); err != nil {
+			log.Printf("Error parsing middleware config for export: %v", err)
+			config = map[string]interface{}{}
+		}
+
+		exportItems = append(exportItems, MiddlewareExportItem{
+			Name:      name,
+			Type:      typ,
+			Config:    config,
+			Priority:  priority,
+			CreatedAt: createdAt,
+		})
+	}
+
+	if err := rows.Err(); err != nil {
+		log.Printf("Error iterating middleware rows for export: %v", err)
+		ResponseWithError(c, http.StatusInternalServerError, "Database error during export")
+		return
+	}
+
+	snapshot := ExportSnapshot{
+		ExportedAt:  time.Now().UTC().Format(time.RFC3339),
+		Version:     "1.0",
+		Middlewares: exportItems,
+	}
+
+	c.Header("Content-Disposition", "attachment; filename=middleware-snapshot.json")
+	c.JSON(http.StatusOK, snapshot)
+}
+
+func (h *MiddlewareHandler) ImportMiddlewares(c *gin.Context) {
+	var req ImportRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		ResponseWithError(c, http.StatusBadRequest, fmt.Sprintf("Invalid request: %v", err))
+		return
+	}
+
+	taskID, err := generateID()
+	if err != nil {
+		log.Printf("Error generating task ID: %v", err)
+		ResponseWithError(c, http.StatusInternalServerError, "Failed to generate task ID")
+		return
+	}
+
+	task := &ImportTask{
+		ID:          taskID,
+		Status:      ImportStatusPending,
+		Skipped:     []string{},
+		ImportedIDs: []string{},
+		FailedIDs:   []string{},
+		Total:       len(req.Middlewares),
+		Processed:   0,
+	}
+
+	importMu.Lock()
+	importTasks[taskID] = task
+	importMu.Unlock()
+
+	go h.runImportTask(task, req.Middlewares)
+
+	c.JSON(http.StatusAccepted, ImportResponse{
+		TaskID: taskID,
+		Status: string(ImportStatusPending),
+	})
+}
+
+func (h *MiddlewareHandler) runImportTask(task *ImportTask, entries []ImportMiddlewareEntry) {
+	importMu.Lock()
+	task.Status = ImportStatusRunning
+	importMu.Unlock()
+
+	var importedIDs []string
+
+	for _, entry := range entries {
+		if !isValidMiddlewareType(entry.Type) {
+			importMu.Lock()
+			task.Skipped = append(task.Skipped, entry.Name)
+			task.Processed++
+			importMu.Unlock()
+			log.Printf("Import: skipped middleware %q - invalid type %q", entry.Name, entry.Type)
+			continue
+		}
+
+		if !validateConfigValueTypes(entry.Config) {
+			importMu.Lock()
+			task.Skipped = append(task.Skipped, entry.Name)
+			task.Processed++
+			importMu.Unlock()
+			log.Printf("Import: skipped middleware %q - invalid config value types", entry.Name)
+			continue
+		}
+
+		configJSON, err := json.Marshal(entry.Config)
+		if err != nil {
+			importMu.Lock()
+			task.Skipped = append(task.Skipped, entry.Name)
+			task.Processed++
+			importMu.Unlock()
+			log.Printf("Import: skipped middleware %q - failed to marshal config: %v", entry.Name, err)
+			continue
+		}
+
+		tx, err := h.DB.Begin()
+		if err != nil {
+			importMu.Lock()
+			task.Status = ImportStatusFailed
+			task.ErrorMessage = fmt.Sprintf("Failed to begin transaction for %q: %v", entry.Name, err)
+			task.FailedIDs = importedIDs
+			importMu.Unlock()
+			log.Printf("Import: failed to begin transaction for %q: %v", entry.Name, err)
+			return
+		}
+
+		var existingID string
+		err = tx.QueryRow("SELECT id FROM middlewares WHERE name = ?", entry.Name).Scan(&existingID)
+		if err != nil && err != sql.ErrNoRows {
+			tx.Rollback()
+			importMu.Lock()
+			task.Status = ImportStatusFailed
+			task.ErrorMessage = fmt.Sprintf("Failed to query existing middleware %q: %v", entry.Name, err)
+			task.FailedIDs = importedIDs
+			importMu.Unlock()
+			log.Printf("Import: failed to query existing middleware %q: %v", entry.Name, err)
+			return
+		}
+
+		if existingID != "" {
+			_, err = tx.Exec("DELETE FROM resource_middlewares WHERE middleware_id = ?", existingID)
+			if err != nil {
+				tx.Rollback()
+				importMu.Lock()
+				task.Status = ImportStatusFailed
+				task.ErrorMessage = fmt.Sprintf("DELETE resource_middlewares failed for %q: %v", entry.Name, err)
+				task.FailedIDs = importedIDs
+				importMu.Unlock()
+				log.Printf("Import: DELETE resource_middlewares failed for %q: %v", entry.Name, err)
+				return
+			}
+
+			_, err = tx.Exec("DELETE FROM middlewares WHERE id = ?", existingID)
+			if err != nil {
+				tx.Rollback()
+				importMu.Lock()
+				task.Status = ImportStatusFailed
+				task.ErrorMessage = fmt.Sprintf("DELETE old middleware failed for %q: %v", entry.Name, err)
+				task.FailedIDs = importedIDs
+				importMu.Unlock()
+				log.Printf("Import: DELETE old middleware failed for %q: %v", entry.Name, err)
+				return
+			}
+
+			_, _ = tx.Exec("INSERT OR REPLACE INTO deleted_templates (id, type) VALUES (?, 'middleware')", existingID)
+		}
+
+		newID, err := generateID()
+		if err != nil {
+			tx.Rollback()
+			importMu.Lock()
+			task.Status = ImportStatusFailed
+			task.ErrorMessage = fmt.Sprintf("Failed to generate ID for %q: %v", entry.Name, err)
+			task.FailedIDs = importedIDs
+			importMu.Unlock()
+			log.Printf("Import: failed to generate ID for %q: %v", entry.Name, err)
+			return
+		}
+
+		_, err = tx.Exec(
+			"INSERT INTO middlewares (id, name, type, config) VALUES (?, ?, ?, ?)",
+			newID, entry.Name, entry.Type, string(configJSON),
+		)
+		if err != nil {
+			tx.Rollback()
+			importMu.Lock()
+			task.Status = ImportStatusFailed
+			task.ErrorMessage = fmt.Sprintf("INSERT middleware failed for %q: %v", entry.Name, err)
+			task.FailedIDs = importedIDs
+			importMu.Unlock()
+			log.Printf("Import: INSERT middleware failed for %q: %v", entry.Name, err)
+			return
+		}
+
+		_, _ = tx.Exec("DELETE FROM deleted_templates WHERE id = ? AND type = 'middleware'", newID)
+
+		if err := tx.Commit(); err != nil {
+			importMu.Lock()
+			task.Status = ImportStatusFailed
+			task.ErrorMessage = fmt.Sprintf("COMMIT failed for %q: %v", entry.Name, err)
+			task.FailedIDs = importedIDs
+			importMu.Unlock()
+			log.Printf("Import: COMMIT failed for %q: %v", entry.Name, err)
+			return
+		}
+
+		importedIDs = append(importedIDs, newID)
+		importMu.Lock()
+		task.ImportedIDs = importedIDs
+		task.Processed++
+		importMu.Unlock()
+		log.Printf("Import: successfully imported middleware %q (%s)", entry.Name, newID)
+	}
+
+	importMu.Lock()
+	task.Status = ImportStatusDone
+	task.ImportedIDs = importedIDs
+	importMu.Unlock()
+}
+
+func (h *MiddlewareHandler) GetImportStatus(c *gin.Context) {
+	taskID := c.Param("id")
+	if taskID == "" {
+		ResponseWithError(c, http.StatusBadRequest, "Task ID is required")
+		return
+	}
+
+	importMu.RLock()
+	task, exists := importTasks[taskID]
+	importMu.RUnlock()
+
+	if !exists {
+		ResponseWithError(c, http.StatusNotFound, "Import task not found")
+		return
+	}
+
+	c.JSON(http.StatusOK, task)
 }

@@ -8,6 +8,10 @@ import type {
   CataloguePlugin,
   CreateMiddlewareRequest,
   UpdateMiddlewareRequest,
+  ExportSnapshot,
+  ImportMiddlewareEntry,
+  ImportTask,
+  ImportResponse,
   CreateServiceRequest,
   UpdateServiceRequest,
   AssignMiddlewareRequest,
@@ -254,6 +258,17 @@ export const middlewareApi = {
     request<void>(`${API_BASE}/middlewares/${encodeURIComponent(id)}`, {
       method: 'DELETE',
     }),
+
+  exportSnapshot: () => request<ExportSnapshot>(`${API_BASE}/middlewares/export`),
+
+  importMiddlewares: (middlewares: ImportMiddlewareEntry[]) =>
+    request<ImportResponse>(`${API_BASE}/middlewares/import`, {
+      method: 'POST',
+      body: JSON.stringify({ middlewares }),
+    }),
+
+  getImportStatus: (taskId: string) =>
+    request<ImportTask>(`${API_BASE}/middlewares/import/${encodeURIComponent(taskId)}/status`),
 }
 
 // Service API

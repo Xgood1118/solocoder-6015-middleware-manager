@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { middlewareApi } from '@/services/api'
-import type { Middleware, CreateMiddlewareRequest, UpdateMiddlewareRequest } from '@/types'
+import type { Middleware, CreateMiddlewareRequest, UpdateMiddlewareRequest, ExportSnapshot, ImportMiddlewareEntry, ImportTask } from '@/types'
 
 interface MiddlewareState {
   // Data
@@ -11,9 +11,14 @@ interface MiddlewareState {
   loading: boolean
   loadingMiddleware: boolean
   saving: boolean
+  exporting: boolean
+  importing: boolean
 
   // Error state
   error: string | null
+
+  // Import state
+  importTask: ImportTask | null
 
   // Actions
   fetchMiddlewares: () => Promise<void>
@@ -21,6 +26,9 @@ interface MiddlewareState {
   createMiddleware: (data: CreateMiddlewareRequest) => Promise<Middleware | null>
   updateMiddleware: (id: string, data: UpdateMiddlewareRequest) => Promise<boolean>
   deleteMiddleware: (id: string) => Promise<boolean>
+  exportMiddlewares: () => Promise<ExportSnapshot | null>
+  importMiddlewares: (entries: ImportMiddlewareEntry[]) => Promise<string | null>
+  pollImportStatus: (taskId: string) => Promise<ImportTask | null>
   clearError: () => void
   clearSelectedMiddleware: () => void
 }
@@ -32,7 +40,10 @@ export const useMiddlewareStore = create<MiddlewareState>((set) => ({
   loading: false,
   loadingMiddleware: false,
   saving: false,
+  exporting: false,
+  importing: false,
   error: null,
+  importTask: null,
 
   // Fetch all middlewares
   fetchMiddlewares: async () => {
@@ -118,6 +129,52 @@ export const useMiddlewareStore = create<MiddlewareState>((set) => ({
         loading: false,
       })
       return false
+    }
+  },
+
+  exportMiddlewares: async () => {
+    set({ exporting: true, error: null })
+    try {
+      const snapshot = await middlewareApi.exportSnapshot()
+      set({ exporting: false })
+      return snapshot
+    } catch (err) {
+      set({
+        error: err instanceof Error ? err.message : 'Failed to export middlewares',
+        exporting: false,
+      })
+      return null
+    }
+  },
+
+  importMiddlewares: async (entries) => {
+    set({ importing: true, error: null, importTask: null })
+    try {
+      const resp = await middlewareApi.importMiddlewares(entries)
+      set({ importing: false })
+      return resp.task_id
+    } catch (err) {
+      set({
+        error: err instanceof Error ? err.message : 'Failed to start import',
+        importing: false,
+      })
+      return null
+    }
+  },
+
+  pollImportStatus: async (taskId) => {
+    try {
+      const task = await middlewareApi.getImportStatus(taskId)
+      set({ importTask: task })
+      if (task.status === 'done' || task.status === 'failed') {
+        set({ importing: false })
+      }
+      return task
+    } catch (err) {
+      set({
+        error: err instanceof Error ? err.message : 'Failed to get import status',
+      })
+      return null
     }
   },
 
